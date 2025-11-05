@@ -15,23 +15,33 @@ class JointAugment:
         self.p_flip = p_flip
         self.degrees = degrees
     
-    def __call__(self, img, vessel_mask):
+    def __call__(self, img, vessel_mask, fov_mask=None):
         # Random horizontal flip
         if random.random() < self.p_flip:
             img = F.hflip(img)
             vessel_mask = F.hflip(vessel_mask)
+            if fov_mask is not None:
+                fov_mask = F.hflip(fov_mask)
         
         # Random vertical flip
         if random.random() < self.p_flip:
             img = F.vflip(img)
             vessel_mask = F.vflip(vessel_mask)
+            if fov_mask is not None:
+                fov_mask = F.vflip(fov_mask)
         
         # Random rotation
         angle = random.uniform(-self.degrees, self.degrees)
         img = F.rotate(img, angle, interpolation=InterpolationMode.BILINEAR)
         vessel_mask = F.rotate(vessel_mask, angle, interpolation=InterpolationMode.NEAREST)
-        
-        return img, vessel_mask
+        if fov_mask is not None:
+            fov_mask = F.rotate(fov_mask, angle, interpolation=InterpolationMode.NEAREST)
+
+
+          
+
+        return (img, vessel_mask, fov_mask) if fov_mask is not None else (img, vessel_mask)
+    
 
 class PH2Dataset(Dataset):
     """
@@ -120,8 +130,8 @@ class DRIVEDataset(Dataset):
         
         # Only use training set (has vessel masks)
         self.image_dir = os.path.join(root_dir, 'training', 'images')
-        self.vessel_mask_dir = os.path.join(root_dir, 'training', '1st_manual')
-        self.fov_mask_dir = os.path.join(root_dir, 'training', 'vessel_mask')  
+        self.vessel_mask_dir = os.path.join(root_dir, 'training', '1st_manual') 
+        self.fov_mask_dir = os.path.join(root_dir, 'training', 'mask')
         
         self.image_paths = sorted(glob.glob(os.path.join(self.image_dir, '*_training.tif')))
         self.vessel_mask_paths = []
@@ -133,7 +143,6 @@ class DRIVEDataset(Dataset):
             img_num = img_name.split('_')[0]
             vessel_mask_name = f'{img_num}_manual1.gif'
             fov_mask_name = f'{img_num}_training_mask.gif'
-            vessel_mask_path = os.path.join(self.mask_dir, vessel_mask_name)
             self.vessel_mask_paths.append(os.path.join(self.vessel_mask_dir, vessel_mask_name))
             self.fov_mask_paths.append(os.path.join(self.fov_mask_dir, fov_mask_name))
         
@@ -353,6 +362,7 @@ if __name__ == "__main__":
         print(f"Image range: [{images.min():.3f}, {images.max():.3f}]")
         print(f"Mask values: {masks.unique()}")
         print("✓ PH2 dataset loaded successfully!\n")
+
     except Exception as e:
         print(f"✗ Error loading PH2: {e}\n")
     
@@ -365,11 +375,13 @@ if __name__ == "__main__":
         )
         
         # Get a batch
-        images, masks = next(iter(train_loader))
+        images, masks, fovs = next(iter(train_loader))
         print(f"Image batch shape: {images.shape}")
         print(f"Mask batch shape: {masks.shape}")
         print(f"Image range: [{images.min():.3f}, {images.max():.3f}]")
         print(f"Mask values: {masks.unique()}")
+        print(f"FOV values: {fovs.unique()}")
         print("✓ DRIVE dataset loaded successfully!")
+
     except Exception as e:
         print(f"✗ Error loading DRIVE: {e}")
