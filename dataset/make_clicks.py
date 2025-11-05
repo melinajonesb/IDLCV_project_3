@@ -122,8 +122,50 @@ class ClickSimulatorPH2:
         return pos, neg
 
     def _sample_boundary(self, mask_bin: np.ndarray, num_pos: int, num_neg: int):
-        """Placeholder for boundary-based click simulation."""
-        raise NotImplementedError("Boundary strategy not implemented yet.")
+        """
+        Boundary-basert klikksimulering:
+        - Positive klikk: langs maskekanten (mask - erodert(mask))
+        - Negative klikk: rett utenfor objektet (dilater(mask) - mask)
+        Faller tilbake til bakgrunn om ringen blir for liten.
+        """
+
+        mask_bin = (mask_bin > 0).astype(np.uint8)
+        H, W = mask_bin.shape
+
+        # --- enkle morfologiske operasjoner via padding og slicing ---
+        pad = np.pad(mask_bin, 1, mode="constant", constant_values=0)
+
+        # Erosion: behold kun piksler som har alle 8 naboer + seg selv = 9
+        sum_3x3 = sum(
+            pad[i:i+H, j:j+W]
+            for i in range(3)
+            for j in range(3)
+        )
+        eroded = (sum_3x3 == 9).astype(np.uint8)
+
+        # Dilation: minst én nabo = 1
+        dilated = (sum_3x3 > 0).astype(np.uint8)
+
+        # Boundary og ytterkant
+        boundary = ((mask_bin - eroded) > 0).astype(np.uint8)
+        outer_ring = ((dilated - mask_bin) > 0).astype(np.uint8)
+
+        # --- hent koordinater ---
+        pos_coords = np.argwhere(boundary == 1)
+        ring_coords = np.argwhere(outer_ring == 1)
+        bg_coords = np.argwhere(mask_bin == 0)
+
+        # --- velg punkter ---
+        pos = self._select_with_min_dist(pos_coords, num_pos)
+
+        neg = []
+        if len(ring_coords) >= num_neg:
+            idx = np.random.choice(len(ring_coords), size=num_neg, replace=False)
+            neg = [tuple(map(int, ring_coords[i])) for i in idx]
+        else:
+            neg = self._select_with_min_dist(bg_coords, num_neg)
+
+        return pos, neg
 
     def sample_clicks(self, mask: torch.Tensor, num_pos: int = 3, num_neg: int = 3):
         """
@@ -173,7 +215,7 @@ if __name__ == "__main__":
     )
 
     # Initialiser simulatoren
-    simulator = ClickSimulatorPH2(strategy="centroid", min_dist=10, seed=42)
+    simulator = ClickSimulatorPH2(strategy="boundary", min_dist=10, seed=42)
 
     print("\nGenerating clicks for random masks...")
     for i, (img, mask) in enumerate(train_loader):
