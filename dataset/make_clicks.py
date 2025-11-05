@@ -71,8 +71,55 @@ class ClickSimulatorPH2:
         return chosen
 
     def _sample_centroid(self, mask_bin: np.ndarray, num_pos: int, num_neg: int):
-        """Placeholder for centroid-based click simulation."""
-        raise NotImplementedError("Centroid strategy not implemented yet.")
+        """
+        Centroid-baserte klikk:
+        - positive: start ved centroid (snappet til nærmeste positive piksel),
+                    deretter farthest-point sampling for spredning
+        - negative: bakgrunnspunkter lengst mulig fra centroid
+        Returnerer: (pos_points, neg_points) som lister av (y, x)
+        """
+        pos_coords = np.argwhere(mask_bin == 1)
+        neg_coords = np.argwhere(mask_bin == 0)
+
+        pos: List[Coord] = []
+        neg: List[Coord] = []
+
+        # --- Positive: centroid + farthest-point sampling ---
+        if len(pos_coords) > 0 and num_pos > 0:
+            cy, cx = np.mean(pos_coords, axis=0)            # centroid (y, x)
+            c = np.array([cy, cx])
+            i0 = int(np.argmin(np.sum((pos_coords - c) ** 2, axis=1)))  # nærmeste pos. piksel
+            pos.append(tuple(map(int, pos_coords[i0])))
+
+            remain = min(num_pos - 1, len(pos_coords) - 1)
+            if remain > 0:
+                min_d2 = np.sum((pos_coords - pos_coords[i0]) ** 2, axis=1)
+                used = {i0}
+                for _ in range(remain):
+                    cand = min_d2.copy()
+                    cand[list(used)] = -1
+                    j = int(np.argmax(cand))
+                    if cand[j] < 0:
+                        break
+                    pos.append(tuple(map(int, pos_coords[j])))
+                    used.add(j)
+                    d2_new = np.sum((pos_coords - pos_coords[j]) ** 2, axis=1)
+                    min_d2 = np.minimum(min_d2, d2_new)
+            pos = pos[:num_pos]
+
+        # --- Negative: langt fra centroid (eller tilfeldig hvis ingen pos) ---
+        if len(neg_coords) > 0 and num_neg > 0:
+            if len(pos) > 0:
+                c = np.array(pos[0])  # bruk første pos som senter
+                d2 = np.sum((neg_coords - c) ** 2, axis=1)
+                order = np.argsort(-d2)  # lengst først
+                take = min(num_neg, len(neg_coords))
+                neg = [tuple(map(int, neg_coords[i])) for i in order[:take]]
+            else:
+                idx = np.random.choice(len(neg_coords), size=min(num_neg, len(neg_coords)), replace=False)
+                neg = [tuple(map(int, neg_coords[i])) for i in idx]
+
+        return pos, neg
 
     def _sample_boundary(self, mask_bin: np.ndarray, num_pos: int, num_neg: int):
         """Placeholder for boundary-based click simulation."""
@@ -126,7 +173,7 @@ if __name__ == "__main__":
     )
 
     # Initialiser simulatoren
-    simulator = ClickSimulatorPH2(strategy="random", min_dist=10, seed=42)
+    simulator = ClickSimulatorPH2(strategy="centroid", min_dist=10, seed=42)
 
     print("\nGenerating clicks for random masks...")
     for i, (img, mask) in enumerate(train_loader):
