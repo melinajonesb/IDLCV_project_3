@@ -224,7 +224,7 @@ if __name__ == "__main__":
     )
 
     # Initialiser simulatoren
-    simulator = ClickSimulatorPH2(strategy="boundary", min_dist=10, seed=42)
+    simulator = ClickSimulatorPH2(strategy="random", min_dist=10, seed=42)
 
     print("\nGenerating clicks for random masks...")
     for i, (img, mask) in enumerate(train_loader):
