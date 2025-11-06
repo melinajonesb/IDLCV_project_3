@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from typing import List, Tuple
 import matplotlib.pyplot as plt
-from dataloader import create_data_loaders
+from dataset.dataloader import create_data_loaders
 
 Coord = Tuple[int, int]  # (y, x)
 

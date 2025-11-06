@@ -36,8 +36,6 @@ class JointAugment:
         vessel_mask = F.rotate(vessel_mask, angle, interpolation=InterpolationMode.NEAREST)
         if fov_mask is not None:
             fov_mask = F.rotate(fov_mask, angle, interpolation=InterpolationMode.NEAREST)
-
-
           
 
         return (img, vessel_mask, fov_mask) if fov_mask is not None else (img, vessel_mask)
