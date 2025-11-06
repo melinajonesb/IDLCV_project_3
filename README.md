@@ -2,149 +2,129 @@
 
 Medical image segmentation on PH2 (skin lesions) and DRIVE (retinal vessels) datasets.
 
-## Structure
+## Project Structure
 
 ```
 .
 ├── README.md
 ├── dataset/
 │   ├── __init__.py
-│   └── dataloader.py       # Data loaders for PH2 and DRIVE
+│   └── dataloader.py           # Full supervision data loaders
+│   ├── make_clicks.py          # Click sampling strategies
+│   └── weak_dataloader.py      # Weak supervision data loader
 ├── models/
 │   ├── __init__.py
-│   ├── encoder_decoder.py  # Simple encoder-decoder
-│   └── U_net.py            # U-Net implementation
-├── losses.py               # CE, Focal, Weighted CE
-├── metrics.py              # Dice, IoU, Accuracy, Sensitivity, Specificity
-├── train.py                # Training and evaluation script
-└── results/                # Save outputs here
+│   ├── encoder_decoder.py      # Simple encoder-decoder
+│   └── U_net.py                # U-Net with skip connections
+├── losses.py                   # Full supervision losses
+├── point_losses.py             # Weak supervision losses
+├── metrics.py                  # Evaluation metrics
+├── train.py                    # Full supervision training
+├── train_weak.py               # Weak supervision training
+├── weak_ablation_study.py      # Automated ablation experiments
+└── results/                    # Save models and results
 ```
 
 ## Datasets
 
 - **Location**: `/dtu/datasets1/02516`
 - **PH2**: Skin lesion segmentation
-- **DRIVE**: Retinal vessel segmentation (use vessel masks, NOT field-of-view masks)
+- **DRIVE**: Retinal vessel segmentation
 
-## Tasks
+## Part 1: Fully Supervised Segmentation
 
-### Task 1: Data Loading
-- [x] Complete `dataset/dataloader.py` for both PH2 and DRIVE
-- [x] Create train/val/test splits
+### Implementation
 
-### Task 2: Simple Encoder-Decoder
-- [x] Complete `models/encoder_decoder.py`
-- [x] Implement `metrics.py` (Dice, IoU, Accuracy, Sensitivity, Specificity)
-- [x] Implement `losses.py` (Cross Entropy, Focal Loss, Weighted CE)
-- [x] Implement `train.py` with training loop and evaluation
-- [x] Train and evaluate on both datasets
+**Architectures**: U-Net, Encoder-Decoder  
+**Loss Functions**: BCE, Focal, Weighted BCE, Dice, Combined  
+**Metrics**: Dice, IoU, Accuracy, Sensitivity, Specificity
 
-### Task 3: U-Net
-- [x] Complete `models/U_net.py`
-- [x] Train and evaluate on both datasets
-- [x] Compare with encoder-decoder
+### Results - PH2 Dataset
 
-### Task 4: Ablation Study
-- [x] Compare different loss functions
+| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
+|--------------|---------------|---------------|--------------|-----------------|-----------------|
+| U-Net | Weighted BCE | **93.84** | **88.41** | **93.40** | 97.69 |
+| U-Net | Dice | 93.65 | 88.08 | 93.12 | 97.59 |
+| U-Net | Combined | 93.48 | 87.76 | 92.57 | 97.75 |
+| U-Net | BCE | 93.31 | 87.49 | 90.35 | 98.72 |
+| Encoder-Decoder | Dice | 92.98 | 86.90 | 92.04 | 97.66 |
 
-## Quick Start
+**Best configuration**: U-Net + Weighted BCE (93.84% Dice)
 
+### Results - DRIVE Dataset
+
+| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
+|--------------|---------------|---------------|--------------|-----------------|-----------------|
+| U-Net | Combined | **60.40** | **43.27** | 60.72 | 96.70 |
+| U-Net | BCE | 56.14 | 39.02 | 50.01 | 97.69 |
+| U-Net | Dice | 54.52 | 37.47 | 75.96 | 91.59 |
+| U-Net | Weighted BCE | 52.64 | 35.72 | **83.15** | 89.13 |
+
+**Best configuration**: U-Net + Combined (60.40% Dice)
+
+---
+
+## Part 2: Weakly Supervised Segmentation
+
+### Method
+
+Training with point clicks instead of full segmentation masks:
+- **Click sampling strategies**: Random, centroid-based, boundary-based
+- **Loss function**: PartialCrossEntropyLoss (BCE only at clicked pixels)
+- **Training**: Loss computed on clicks, metrics evaluated on full masks
+
+### Results - PH2 Dataset
+
+**Fully supervised baseline**: 91.79% Dice
+
+**Weak supervision performance**:
+
+| Clicks | Strategy | Test Dice (%) | % of Baseline |
+|--------|----------|---------------|---------------|
+| 2 (1+1) | Random | **90.61** | **98.7%** |
+| 4 (2+2) | Random | 90.45 | 98.5% |
+| 6 (3+3) | Random | 88.65 | 96.6% |
+| 8 (4+4) | Random | 90.73 | 98.8% |
+| 10 (5+5) | Random | 90.42 | 98.5% |
+| 20 (10+10) | Random | 89.51 | 97.5% |
+| 40 (20+20) | Random | **91.46** | **99.6%** |
+
+**Strategy comparison (10 clicks)**:
+
+| Strategy | Test Dice (%) |
+|----------|---------------|
+| Random | 90.42 |
+| Centroid | 85.46 |
+| Boundary | 65.77 |
+
+**Key findings**:
+- 2 clicks achieve 98.7% of fully supervised performance
+- 40 clicks achieve 99.6% of fully supervised performance  
+- Random sampling outperforms centroid and boundary strategies
+- Boundary strategy fails (65.77%) due to ambiguous edge supervision
+
+---
+
+## Usage
+
+### Full Supervision
 ```bash
-# Training
-python train.py --dataset PH2 --model unet --loss focal
+python train.py --dataset PH2 --model unet --loss weighted_bce --epochs 50
 ```
 
-# Complete Experimental Results
+### Weak Supervision
+```bash
+# Single experiment
+python train_weak.py --n_pos_clicks 5 --n_neg_clicks 5 --epochs 50
 
-## PH2 Dataset (Skin Lesions - 200 images)
-
-| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Accuracy (%) | Sensitivity (%) | Specificity (%) |
-|--------------|---------------|---------------|--------------|--------------|-----------------|-----------------|
-| **U-Net** | **Weighted BCE** | **93.84** | **88.41** | **96.59** | **93.40** | 97.69 |
-| **U-Net** | Dice | 93.65 | 88.08 | 96.39 | 93.12 | 97.59 |
-| **U-Net** | Combined | 93.48 | 87.76 | 96.39 | 92.57 | 97.75 |
-| **U-Net** | BCE | 93.31 | 87.49 | 96.49 | 90.35 | 98.72 |
-| Encoder-Decoder | Dice | 92.98 | 86.90 | 96.12 | 92.04 | 97.66 |
-| Encoder-Decoder | Combined | 92.85 | 86.65 | 96.15 | 90.77 | 98.10 |
-| Encoder-Decoder | BCE | 92.65 | 86.32 | 96.08 | 90.03 | **98.26** |
-| Encoder-Decoder | Focal | 92.31 | 85.73 | 95.98 | 87.85 | **99.02** |
-| Encoder-Decoder | Weighted BCE | 92.31 | 85.73 | 95.73 | 91.45 | 97.31 |
-| **U-Net** | Focal | 90.73 | 83.09 | 95.01 | 85.80 | 98.43 |
-
-**Best Model:** U-Net + Weighted BCE  
-**Highest Dice:** 93.84%  
-**Highest Sensitivity:** 93.40% (U-Net + Weighted BCE)  
-**Highest Specificity:** 99.02% (Encoder-Decoder + Focal)
+# Full ablation study
+python weak_ablation_study.py full
+```
 
 ---
 
-## DRIVE Dataset (Retinal Vessels - 20 images)
+## Next Steps
 
-| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Accuracy (%) | Sensitivity (%) | Specificity (%) |
-|--------------|---------------|---------------|--------------|--------------|-----------------|-----------------|
-| **U-Net** | **Combined** | **60.40** | **43.27** | 93.97 | 60.72 | 96.70 |
-| **U-Net** | BCE | 56.14 | 39.02 | **94.08** | 50.01 | 97.69 |
-| **U-Net** | Dice | 54.52 | 37.47 | 90.41 | 75.96 | 91.59 |
-| **U-Net** | Weighted BCE | 52.64 | 35.72 | 88.67 | **83.15** | 89.13 |
-| Encoder-Decoder | Combined | 26.88 | 15.53 | 88.20 | 28.66 | 93.07 |
-| Encoder-Decoder | Dice | 26.78 | 15.46 | 80.32 | 47.54 | 83.00 |
-| Encoder-Decoder | Weighted BCE | 23.43 | 13.27 | 69.89 | 60.86 | 70.63 |
-| **U-Net** | Focal | 5.74 | 2.96 | 92.65 | 2.96 | **99.99** |
-| Encoder-Decoder | BCE | 2.04 | 1.03 | 92.43 | 1.04 | 99.91 |
-| Encoder-Decoder | Focal | 0.00 | 0.00 | 92.43 | 0.00 | **100.00** |
-
-**Best Model:** U-Net + Combined  
-**Highest Dice:** 60.40%  
-**Highest Sensitivity:** 83.15% (U-Net + Weighted BCE)  
-**Highest Specificity:** 100.00% (Encoder-Decoder + Focal - but useless!)
-
----
-
-## Key Observations
-
-### Architecture Performance
-
-| Dataset | U-Net Avg Dice | Encoder-Decoder Avg Dice | Gap |
-|---------|----------------|--------------------------|-----|
-| **PH2** | 92.80% | 92.62% | +0.18% |
-| **DRIVE** | 45.89% | 15.83% | **+30.06%** |
-
-### Loss Function Rankings
-
-**PH2 (U-Net):**
-1. Weighted BCE: 93.84%
-2. Dice: 93.65%
-3. Combined: 93.48%
-4. BCE: 93.31%
-5. Focal: 90.73%
-
-**DRIVE (U-Net):**
-1. Combined: 60.40%
-2. BCE: 56.14%
-3. Dice: 54.52%
-4. Weighted BCE: 52.64%
-5. Focal: 5.74%
-
-### Critical Findings
-
-- **U-Net essential for small datasets:** +30% improvement on DRIVE
-- **Encoder-Decoder fails on DRIVE:** Best result only 26.88% (not clinically viable)
-- **Focal Loss fails both datasets:** Too aggressive for mild class imbalance
-- **Weighted BCE best for sensitivity:** 93.40% (PH2), 83.15% (DRIVE)
-- **Combined Loss best overall for hard tasks:** 60.40% on DRIVE
-- **Trade-off exists:** High sensitivity → Lower specificity
-
-### Success Rate (Dice > 50%)
-
-- **U-Net:** 9/10 experiments (90%)
-- **Encoder-Decoder:** 5/10 experiments (50%)
-
----
-
-## Recommendations
-
-**Use U-Net** for medical segmentation (especially with limited data)  
-**Use Combined Loss** for balanced performance  
-**Use Weighted BCE** when detecting lesions/vessels is critical  
-**Avoid Focal Loss** for mild class imbalance  
-**Avoid Encoder-Decoder** for challenging small datasets
+1. **Advanced point losses**: Implement Dice-based and Focal variants
+2. **Non-equal click ratios**: Test asymmetric configurations (5+1, 10+1, 1+20)
+3. **Bounding box supervision**: Iterative pseudo-label refinement
