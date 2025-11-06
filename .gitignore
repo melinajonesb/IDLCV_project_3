@@ -1,6 +1,10 @@
 # Traning results
 results/
 
+# Visualization outputs
+click_viz_*.png
+dataset/click_viz_*.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

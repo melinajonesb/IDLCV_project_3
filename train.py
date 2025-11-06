@@ -13,7 +13,7 @@ from models.U_net import UNet
 from losses import get_loss_function
 from metrics import compute_all_metrics
 
-
+# test
 def train_epoch(model, train_loader, criterion, optimizer, device):
     """Train for one epoch"""
     model.train()
