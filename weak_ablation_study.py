@@ -316,7 +316,7 @@ def quick_test():
     print("QUICK TEST")
     print("="*80 + "\n")
     
-    run_experiment(n_pos=5, n_neg=5, strategy='random', epochs=30)
+    run_experiment(n_pos=5, n_neg=5, strategy='random', epochs=50)
 
 
 def main():
