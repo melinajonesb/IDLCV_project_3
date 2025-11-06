@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import matplotlib.pyplot as plt
 from dataloader import create_data_loaders
 
@@ -11,9 +11,10 @@ class ClickSimulatorPH2:
     Simulates user clicks (positive = lesion, negative = background)
     for PH2 dataset using the full segmentation masks.
 
-    Current strategies:
-        - "random" : random sampling inside lesion / background
-        (placeholders for "centroid" and "boundary" for future use)
+    Strategies:
+        - "random" : random sampling inside lesion and background (default)
+        - "centroid" : centroid-based sampling (positive) + random negative
+        - "boundary" : boundary-based sampling for both positive and negative (along edges, might need many clicks to work well)
 
     Args:
         strategy: Sampling strategy ("random", "centroid", "boundary")
@@ -26,6 +27,7 @@ class ClickSimulatorPH2:
         self.min_dist = int(min_dist)
         if seed is not None:
             np.random.seed(seed)
+            torch.manual_seed(seed)
 
     def _to_numpy(self, mask: torch.Tensor) -> np.ndarray:
         """Convert tensor mask to binary numpy array."""
@@ -40,6 +42,7 @@ class ClickSimulatorPH2:
         """
         Randomly sample coordinates for positive and negative clicks.
         Sets minimum distance if specified to avoid clustering.
+        Returns: (pos_points, neg_points) as lists of (y, x)
         """
         pos = self._select_with_min_dist(pos_coords, num_pos)
         neg = self._select_with_min_dist(neg_coords, num_neg)
@@ -60,23 +63,23 @@ class ClickSimulatorPH2:
         chosen.append(tuple(map(int, available[i0])))
 
         while len(chosen) < k and len(available) > 0:
-            # compute distance to chosen
             d2 = np.min([np.sum((available - np.array(c)) ** 2, axis=1) for c in chosen], axis=0)
             keep = available[d2 >= self.min_dist ** 2]
             if len(keep) == 0:
                 break
             i = np.random.choice(len(keep))
             chosen.append(tuple(map(int, keep[i])))
-            available = np.delete(available, i, axis=0)
+            keep = np.delete(keep, i, axis=0)
+            available = keep
         return chosen
 
     def _sample_centroid(self, mask_bin: np.ndarray, num_pos: int, num_neg: int):
         """
-        Centroid-baserte klikk:
-        - positive: start ved centroid (snappet til nærmeste positive piksel),
-                    deretter farthest-point sampling for spredning
-        - negative: bakgrunnspunkter lengst mulig fra centroid
-        Returnerer: (pos_points, neg_points) som lister av (y, x)
+        Centroid-based clicks:
+        - Positive: start at centroid (snapped to nearest positive pixel),
+                    then farthest-point sampling
+        - Negative: uses the _sample_random method
+        Returns: (pos_points, neg_points) as lists of (y, x)
         """
         pos_coords = np.argwhere(mask_bin == 1)
         neg_coords = np.argwhere(mask_bin == 0)
@@ -88,7 +91,7 @@ class ClickSimulatorPH2:
         if len(pos_coords) > 0 and num_pos > 0:
             cy, cx = np.mean(pos_coords, axis=0)            # centroid (y, x)
             c = np.array([cy, cx])
-            i0 = int(np.argmin(np.sum((pos_coords - c) ** 2, axis=1)))  # nærmeste pos. piksel
+            i0 = int(np.argmin(np.sum((pos_coords - c) ** 2, axis=1)))  # nearest pos. pixel
             pos.append(tuple(map(int, pos_coords[i0])))
 
             remain = min(num_pos - 1, len(pos_coords) - 1)
@@ -107,35 +110,31 @@ class ClickSimulatorPH2:
                     min_d2 = np.minimum(min_d2, d2_new)
             pos = pos[:num_pos]
 
-        # --- Negative: langt fra centroid (eller tilfeldig hvis ingen pos) ---
+        # --- Negative: random sampling ---
         if len(neg_coords) > 0 and num_neg > 0:
-            if len(pos) > 0:
-                c = np.array(pos[0])  # bruk første pos som senter
-                d2 = np.sum((neg_coords - c) ** 2, axis=1)
-                order = np.argsort(-d2)  # lengst først
-                take = min(num_neg, len(neg_coords))
-                neg = [tuple(map(int, neg_coords[i])) for i in order[:take]]
-            else:
-                idx = np.random.choice(len(neg_coords), size=min(num_neg, len(neg_coords)), replace=False)
-                neg = [tuple(map(int, neg_coords[i])) for i in idx]
+            # Bruk eksisterende metode for tilfeldige negative klikk
+            _, neg = self._sample_random(pos_coords, neg_coords, 0, num_neg)
 
         return pos, neg
 
     def _sample_boundary(self, mask_bin: np.ndarray, num_pos: int, num_neg: int):
         """
+        Boundary-based clicks:
+        - Positive clicks: along the lesion boundary
+        - Negative clicks: along the outer ring just outside the lesion
+        If not enough points in the ring, fall back to random background clicks.
+        Returns: (pos_points, neg_points) as lists of (y, x)
         Boundary-basert klikksimulering:
-        - Positive klikk: langs maskekanten (mask - erodert(mask))
-        - Negative klikk: rett utenfor objektet (dilater(mask) - mask)
-        Faller tilbake til bakgrunn om ringen blir for liten.
         """
 
         mask_bin = (mask_bin > 0).astype(np.uint8)
         H, W = mask_bin.shape
 
-        # --- enkle morfologiske operasjoner via padding og slicing ---
+        # zero padding
         pad = np.pad(mask_bin, 1, mode="constant", constant_values=0)
 
-        # Erosion: behold kun piksler som har alle 8 naboer + seg selv = 9
+        # Only keep pixels that have all 8 neighbors + itself = 9 
+        # (to shrink the mask so we can later extract the boundary by subtracting it)
         sum_3x3 = sum(
             pad[i:i+H, j:j+W]
             for i in range(3)
@@ -143,19 +142,19 @@ class ClickSimulatorPH2:
         )
         eroded = (sum_3x3 == 9).astype(np.uint8)
 
-        # Dilation: minst én nabo = 1
+        # Dilation: at least one neighbor
         dilated = (sum_3x3 > 0).astype(np.uint8)
 
-        # Boundary og ytterkant
+        # Boundary og outer ring
         boundary = ((mask_bin - eroded) > 0).astype(np.uint8)
         outer_ring = ((dilated - mask_bin) > 0).astype(np.uint8)
 
-        # --- hent koordinater ---
+        # --- get coordinates ---
         pos_coords = np.argwhere(boundary == 1)
         ring_coords = np.argwhere(outer_ring == 1)
         bg_coords = np.argwhere(mask_bin == 0)
 
-        # --- velg punkter ---
+        # --- choose points ---
         pos = self._select_with_min_dist(pos_coords, num_pos)
 
         neg = []
@@ -170,7 +169,6 @@ class ClickSimulatorPH2:
     def sample_clicks(self, mask: torch.Tensor, num_pos: int = 3, num_neg: int = 3):
         """
         Generate simulated clicks from a segmentation mask.
-
         Returns:
             pos_points, neg_points : lists of (y, x) coordinates
         """
@@ -188,20 +186,31 @@ class ClickSimulatorPH2:
             raise ValueError(f"Unknown strategy: {self.strategy}")
         
     def to_click_masks(self, mask: torch.Tensor, pos_points, neg_points):
-        """Create binary click masks [1,1,H,W] for use in loss computation."""
+        """
+        Create binary click masks [1,1,H,W] for use in loss computation.
+        Returns: (pos_mask, neg_mask)
+        """
         h, w = mask.shape[-2:]
-        pos = torch.zeros((1, 1, h, w), dtype=torch.float32)
-        neg = torch.zeros_like(pos)
+        device = mask.device
+        pos_mask = torch.zeros((1, 1, h, w), dtype=torch.float32, device=device)
+        neg_mask = torch.zeros_like(pos_mask)
 
         # sett punkter (y, x) til 1
         for (y, x) in pos_points:
             if 0 <= y < h and 0 <= x < w:
-                pos[0, 0, y, x] = 1.0
+                pos_mask[0, 0, y, x] = 1.0
         for (y, x) in neg_points:
             if 0 <= y < h and 0 <= x < w:
-                neg[0, 0, y, x] = 1.0
+                neg_mask[0, 0, y, x] = 1.0
         
-        return pos, neg
+        return pos_mask, neg_mask
+    
+    def to_loss_tensors(self, mask, pos_points, neg_points):
+        pos_mask, neg_mask = self.to_click_masks(mask, pos_points, neg_points)
+        click_mask = (pos_mask + neg_mask).clamp(max=1)
+        click_labels = pos_mask
+        
+        return click_mask, click_labels
         
 
 
@@ -215,7 +224,7 @@ if __name__ == "__main__":
     )
 
     # Initialiser simulatoren
-    simulator = ClickSimulatorPH2(strategy="boundary", min_dist=10, seed=42)
+    simulator = ClickSimulatorPH2(strategy="random", min_dist=10, seed=42)
 
     print("\nGenerating clicks for random masks...")
     for i, (img, mask) in enumerate(train_loader):
@@ -245,9 +254,9 @@ if __name__ == "__main__":
             arr[y0:y1, x0:x1, :] = color
 
         for (y, x) in pos_pts:
-            draw_dot(vis, int(y), int(x), [0.0, 1.0, 0.0])  # røde punkter = positive
+            draw_dot(vis, int(y), int(x), [0.0, 1.0, 0.0])  # grønne punkter = positive
         for (y, x) in neg_pts:
-            draw_dot(vis, int(y), int(x), [1.0, 0.0, 0.0])  # grønne punkter = negative
+            draw_dot(vis, int(y), int(x), [1.0, 0.0, 0.0])  # røde punkter = negative
 
         fig, axs = plt.subplots(1, 2, figsize=(8, 4))
         axs[0].imshow(vis)
@@ -261,19 +270,3 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig(f"click_viz_{i+1}.png")
         plt.close()
-
-"""
-from dataset.dataloader import create_data_loaders
-from utils.click_simulator_ph2 import ClickSimulatorPH2
-
-# Last inn PH2-data
-train_loader, _, _ = create_data_loaders('PH2', batch_size=1, img_size=256, num_workers=0)
-image, mask = next(iter(train_loader))
-
-# Lag klikk
-sim = ClickSimulatorPH2(strategy="random", min_dist=10, seed=42)
-pos, neg = sim.sample_clicks(mask[0], num_pos=3, num_neg=3)
-
-print("Positive clicks:", pos)
-print("Negative clicks:", neg)
-"""
