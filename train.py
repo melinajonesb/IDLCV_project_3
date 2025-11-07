@@ -312,7 +312,7 @@ def train(args):
         # Save latest checkpoint
         if (epoch + 1) % args.save_freq == 0:
             checkpoint_path = os.path.join(results_dir, f'checkpoint_epoch_{epoch+1}.pth')
-            save_checkpoint(model, optimizer, epoch, val_metrics, args, checkpoint_path)
+            #save_checkpoint(model, optimizer, epoch, val_metrics, args, checkpoint_path)
     
     print("\n" + "=" * 80)
     print("Training completed!")
