@@ -39,29 +39,36 @@ Medical image segmentation on PH2 (skin lesions) and DRIVE (retinal vessels) dat
 **Loss Functions**: BCE, Focal, Weighted BCE, Dice, Combined  
 **Metrics**: Dice, IoU, Accuracy, Sensitivity, Specificity
 
+
 ### Results - PH2 Dataset
 
-| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
-|--------------|---------------|---------------|--------------|-----------------|-----------------|
-| U-Net | Weighted BCE | **93.84** | **88.41** | **93.40** | 97.69 |
-| U-Net | Dice | 93.65 | 88.08 | 93.12 | 97.59 |
-| U-Net | Combined | 93.48 | 87.76 | 92.57 | 97.75 |
-| U-Net | BCE | 93.31 | 87.49 | 90.35 | 98.72 |
-| Encoder-Decoder | Dice | 92.98 | 86.90 | 92.04 | 97.66 |
+| Architecture      | Loss Function | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
+|-------------------|---------------|---------------|--------------|-----------------|-----------------|
+| **U-Net**         | **Weighted BCE** | **93.07**  | **87.05**    | **94.88**       | **96.52** |
+| U-Net             | Focal           | 88.55.      | 79.56        | 89.53           | 94.68 |
+| U-Net             | BCE             | 92.69       | 86.39        | 94.04           | 96.43 |
+| Encoder-Decoder   | Weighted BCE    | 92.14       | 85.43        | 92.61           | 96.61 |
+| Encoder-Decoder   | Focal           | 89.79       | 81.52        | 85.15           | 98.13 |
+| Encoder-Decoder   | BCE             | 90.75       | 83.08        | 89.83.          | 96.27 |
+ 
+**Best configuration (PH2):** U-Net + Weighted BCE (Dice = 93.07 %)
 
-**Best configuration**: U-Net + Weighted BCE (93.84% Dice)
 
 ### Results - DRIVE Dataset
 
-| Architecture | Loss Function | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
-|--------------|---------------|---------------|--------------|-----------------|-----------------|
-| U-Net | Combined | **60.40** | **43.27** | 60.72 | 96.70 |
-| U-Net | BCE | 56.14 | 39.02 | 50.01 | 97.69 |
-| U-Net | Dice | 54.52 | 37.47 | 75.96 | 91.59 |
-| U-Net | Weighted BCE | 52.64 | 35.72 | **83.15** | 89.13 |
+| Architecture      | Loss Function   | Test Dice (%) | Test IoU (%) | Sensitivity (%) | Specificity (%) |
+|-------------------|-----------------|---------------|--------------|-----------------|-----------------|
+| **U-Net**         | **Weighted BCE** | **55.54**    | **38.44**    | **67.40**       | **93.19** |
+| U-Net             | Focal            | 6.62         | 3.42         | 5.58            | 94.31 |
+| U-Net             | BCE              | 21.55        | 12.07        | 100.00 †        | 34.17 |
+| Encoder-Decoder   | Weighted BCE     | 21.55        | 12.07        | 100.00 †        | 34.17 |
+| Encoder-Decoder   | Focal            | 0.00         | 0.00         | 0.00            | 100.00 |
+| Encoder-Decoder   | BCE              | 21.55        | 12.07        | 100.00 †        | 34.17 |
 
-**Best configuration**: U-Net + Combined (60.40% Dice)
+**Best configuration (DRIVE):** U-Net + Weighted BCE (Dice = 55.54 %)  
 
+† *Extremely high sensitivity and low specificity indicate instability (model predicted mostly foreground).*
+Encoder-Decoder + Focal failed to learn — predicted only background (Dice = 0) probably.
 ---
 
 ## Part 2: Weakly Supervised Segmentation
