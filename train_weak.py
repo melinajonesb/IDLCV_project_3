@@ -1,71 +1,73 @@
+"""
+Training script for weakly supervised segmentation using point clicks.
+
+Key differences from train.py:
+- Uses WeakPH2Dataset instead of PH2Dataset
+- Uses PartialCrossEntropyLoss instead of full mask losses
+- Evaluates on full masks but trains on clicks only
+"""
 import os
 import argparse
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import numpy as np
 from datetime import datetime
+import json
 
-from dataset.dataloader import create_data_loaders
-from models.encoder_decoder import EncoderDecoder
+from dataset.weak_dataloader import create_weak_dataloaders
 from models.U_net import UNet
-from losses import get_loss_function
+from models.encoder_decoder import EncoderDecoder
+from point_losses import PartialCrossEntropyLoss
 from metrics import compute_all_metrics
 
-# test
+
 def train_epoch(model, train_loader, criterion, optimizer, device):
-    """Train for one epoch"""
+    """
+    Train for one epoch using ONLY point clicks.
+    The full mask is never used during training!
+    """
     model.train()
     total_loss = 0
-    all_metrics = {
-        'dice': [],
-        'iou': [],
-        'accuracy': [],
-        'sensitivity': [],
-        'specificity': []
-    }
+    num_batches = 0
     
     pbar = tqdm(train_loader, desc='Training')
-    for images, masks in pbar:
-        images = images.to(device)
-        masks = masks.to(device)
+    for batch in pbar:
+        images = batch['image'].to(device)
+        click_mask = batch['click_mask'].to(device)
+        click_labels = batch['click_labels'].to(device)
+        # full_mask is NOT used in training!
         
         # Forward pass
         optimizer.zero_grad()
-        outputs = model(images)
+        outputs = model(images)  # (B, 1, H, W) logits
         
-        # Calculate loss
-        loss = criterion(outputs, masks)
+        # Calculate loss ONLY at click locations
+        loss = criterion(outputs, click_mask, click_labels)
         
         # Backward pass
         loss.backward()
         optimizer.step()
         
         total_loss += loss.item()
+        num_batches += 1
         
-        # Calculate metrics
-        with torch.no_grad():
-            outputs_prob = torch.sigmoid(outputs)
-            batch_metrics = compute_all_metrics(outputs_prob, masks)
-            for key in all_metrics:
-                all_metrics[key].append(batch_metrics[key])
-        
-        # Update progress bar
-        pbar.set_postfix({'loss': loss.item()})
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
-    # Average metrics
-    avg_loss = total_loss / len(train_loader)
-    avg_metrics = {key: np.mean(values) for key, values in all_metrics.items()}
-    avg_metrics['loss'] = avg_loss
-    
-    return avg_metrics
+    avg_loss = total_loss / num_batches
+    return {'loss': avg_loss}
 
 
 def validate(model, val_loader, criterion, device):
-    """Validate the model"""
+    """
+    Validate the model.
+    - Loss computed on clicks (weak supervision)
+    - Metrics computed on FULL masks (to measure actual performance)
+    """
     model.eval()
     total_loss = 0
+    num_batches = 0
+    
     all_metrics = {
         'dice': [],
         'iou': [],
@@ -76,27 +78,30 @@ def validate(model, val_loader, criterion, device):
     
     with torch.no_grad():
         pbar = tqdm(val_loader, desc='Validation')
-        for images, masks in pbar:
-            images = images.to(device)
-            masks = masks.to(device)
+        for batch in pbar:
+            images = batch['image'].to(device)
+            click_mask = batch['click_mask'].to(device)
+            click_labels = batch['click_labels'].to(device)
+            full_mask = batch['full_mask'].to(device)
             
             # Forward pass
-            outputs = model(images)
+            outputs = model(images)  # (B, 1, H, W) logits
             
-            # Calculate loss
-            loss = criterion(outputs, masks)
+            # Loss on clicks
+            loss = criterion(outputs, click_mask, click_labels)
             total_loss += loss.item()
+            num_batches += 1
             
-            # Calculate metrics
+            # Metrics on FULL mask
             outputs_prob = torch.sigmoid(outputs)
-            batch_metrics = compute_all_metrics(outputs_prob, masks)
+            batch_metrics = compute_all_metrics(outputs_prob, full_mask)
             for key in all_metrics:
                 all_metrics[key].append(batch_metrics[key])
             
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
-    # Average metrics
-    avg_loss = total_loss / len(val_loader)
+    # Average
+    avg_loss = total_loss / num_batches
     avg_metrics = {key: np.mean(values) for key, values in all_metrics.items()}
     avg_metrics['loss'] = avg_loss
     
@@ -113,19 +118,22 @@ def save_checkpoint(model, optimizer, epoch, metrics, args, filename):
         'args': vars(args)
     }
     torch.save(checkpoint, filename)
-    print(f"Checkpoint saved: {filename}")
 
 
 def train(args):
     """Main training function"""
     # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
+    device = torch.device('cuda' if torch.cuda.is_available() else 
+                         'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Create data loaders
-    print(f"\nLoading {args.dataset} dataset...")
-    train_loader, val_loader, test_loader = create_data_loaders(
+    # Create WEAK dataloaders
+    print(f"\nCreating weak supervision dataloaders...")
+    train_loader, val_loader, test_loader = create_weak_dataloaders(
         dataset_name=args.dataset,
+        n_pos_clicks=args.n_pos_clicks,
+        n_neg_clicks=args.n_neg_clicks,
+        click_strategy=args.click_strategy,
         batch_size=args.batch_size,
         img_size=args.img_size,
         num_workers=args.num_workers
@@ -143,14 +151,14 @@ def train(args):
     model = model.to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Create loss function
-    print(f"\nUsing {args.loss} loss...")
-    criterion = get_loss_function(args.loss)
+    # Create point-supervised loss
+    print(f"\nUsing PartialCrossEntropyLoss (point supervision)...")
+    criterion = PartialCrossEntropyLoss()
     
     # Create optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
-    # Learning rate scheduler (optional)
+    # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=5
     )
@@ -158,10 +166,14 @@ def train(args):
     # Create results directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = os.path.join(
-        'results', 
-        f"{args.dataset}_{args.model}_{args.loss}_{timestamp}"
+        'results',
+        f"{args.dataset}_{args.model}_pos{args.n_pos_clicks}_neg{args.n_neg_clicks}_{args.click_strategy}_{timestamp}"
     )
     os.makedirs(results_dir, exist_ok=True)
+    
+    # Save args
+    with open(os.path.join(results_dir, 'args.json'), 'w') as f:
+        json.dump(vars(args), f, indent=2)
     
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -171,10 +183,11 @@ def train(args):
     history = {
         'train_loss': [],
         'val_loss': [],
-        'train_dice': [],
         'val_dice': [],
-        'train_iou': [],
-        'val_iou': []
+        'val_iou': [],
+        'val_accuracy': [],
+        'val_sensitivity': [],
+        'val_specificity': []
     }
     
     for epoch in range(args.epochs):
@@ -191,20 +204,20 @@ def train(args):
         scheduler.step(val_metrics['dice'])
         
         # Print metrics
-        print(f"\nTrain - Loss: {train_metrics['loss']:.4f}, "
-              f"Dice: {train_metrics['dice']:.4f}, "
-              f"IoU: {train_metrics['iou']:.4f}")
-        print(f"Val   - Loss: {val_metrics['loss']:.4f}, "
-              f"Dice: {val_metrics['dice']:.4f}, "
-              f"IoU: {val_metrics['iou']:.4f}")
+        print(f"\nTrain Loss: {train_metrics['loss']:.4f}")
+        print(f"Val Loss: {val_metrics['loss']:.4f}")
+        print(f"Val Metrics on Full Masks:")
+        print(f"  Dice: {val_metrics['dice']:.4f}")
+        print(f"  IoU: {val_metrics['iou']:.4f}")
+        print(f"  Accuracy: {val_metrics['accuracy']:.4f}")
+        print(f"  Sensitivity: {val_metrics['sensitivity']:.4f}")
+        print(f"  Specificity: {val_metrics['specificity']:.4f}")
         
         # Save history
         history['train_loss'].append(train_metrics['loss'])
         history['val_loss'].append(val_metrics['loss'])
-        history['train_dice'].append(train_metrics['dice'])
-        history['val_dice'].append(val_metrics['dice'])
-        history['train_iou'].append(train_metrics['iou'])
-        history['val_iou'].append(val_metrics['iou'])
+        for key in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']:
+            history[f'val_{key}'].append(val_metrics[key])
         
         # Save best model
         if val_metrics['dice'] > best_dice:
@@ -212,11 +225,10 @@ def train(args):
             best_checkpoint = os.path.join(results_dir, 'best_model.pth')
             save_checkpoint(model, optimizer, epoch, val_metrics, args, best_checkpoint)
             print(f"✓ New best model! Dice: {best_dice:.4f}")
-        
-        # Save latest checkpoint
-        if (epoch + 1) % args.save_freq == 0:
-            checkpoint_path = os.path.join(results_dir, f'checkpoint_epoch_{epoch+1}.pth')
-            #save_checkpoint(model, optimizer, epoch, val_metrics, args, checkpoint_path)
+    
+    # Save history
+    with open(os.path.join(results_dir, 'history.json'), 'w') as f:
+        json.dump(history, f, indent=2)
     
     print("\n" + "=" * 80)
     print("Training completed!")
@@ -225,8 +237,8 @@ def train(args):
     # Test on test set
     print("\nEvaluating on test set...")
     test_metrics = validate(model, test_loader, criterion, device)
-    print(f"\nTest Results:")
-    print(f"  Loss: {test_metrics['loss']:.4f}")
+    
+    print(f"\nTest Results (on Full Masks):")
     print(f"  Dice: {test_metrics['dice']:.4f}")
     print(f"  IoU: {test_metrics['iou']:.4f}")
     print(f"  Accuracy: {test_metrics['accuracy']:.4f}")
@@ -234,57 +246,61 @@ def train(args):
     print(f"  Specificity: {test_metrics['specificity']:.4f}")
     
     # Save final results
-    results_file = os.path.join(results_dir, 'results.txt')
-    with open(results_file, 'w') as f:
-        f.write(f"Dataset: {args.dataset}\n")
-        f.write(f"Model: {args.model}\n")
-        f.write(f"Loss: {args.loss}\n")
-        f.write(f"Epochs: {args.epochs}\n")
-        f.write(f"Batch size: {args.batch_size}\n")
-        f.write(f"Learning rate: {args.lr}\n")
-        f.write(f"\nBest validation Dice: {best_dice:.4f}\n")
-        f.write(f"\nTest Results:\n")
-        for key, value in test_metrics.items():
-            f.write(f"  {key}: {value:.4f}\n")
+    results = {
+        'args': vars(args),
+        'best_val_dice': best_dice,
+        'test_metrics': test_metrics,
+        'history': history
+    }
+    
+    with open(os.path.join(results_dir, 'results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
     
     print(f"\nResults saved to: {results_dir}")
+    
+    return results_dir, test_metrics
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train segmentation model')
+    parser = argparse.ArgumentParser(
+        description='Train segmentation model with weak supervision (point clicks)'
+    )
     
     # Dataset arguments
-    parser.add_argument('--dataset', type=str, default='PH2', 
-                        choices=['PH2', 'DRIVE'],
-                        help='Dataset to use (default: PH2)')
+    parser.add_argument('--dataset', type=str, default='PH2',
+                       help='Dataset to use (default: PH2)')
     parser.add_argument('--img_size', type=int, default=256,
-                        help='Image size (default: 256)')
+                       help='Image size (default: 256)')
     parser.add_argument('--batch_size', type=int, default=8,
-                        help='Batch size (default: 8)')
+                       help='Batch size (default: 8)')
     parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers (default: 4)')
+                       help='Number of workers (default: 4)')
+    
+    # Weak supervision arguments
+    parser.add_argument('--n_pos_clicks', type=int, default=5,
+                       help='Number of positive clicks (default: 5)')
+    parser.add_argument('--n_neg_clicks', type=int, default=5,
+                       help='Number of negative clicks (default: 5)')
+    parser.add_argument('--click_strategy', type=str, default='random',
+                       choices=['random', 'centroid', 'boundary'],
+                       help='Click sampling strategy (default: random)')
     
     # Model arguments
     parser.add_argument('--model', type=str, default='unet',
-                        choices=['unet', 'encoder_decoder'],
-                        help='Model architecture (default: unet)')
+                       choices=['unet', 'encoder_decoder'],
+                       help='Model architecture (default: unet)')
     
     # Training arguments
-    parser.add_argument('--loss', type=str, default='bce',
-                        choices=['bce', 'focal', 'weighted_bce', 'dice', 'combined'],
-                        help='Loss function (default: bce)')
     parser.add_argument('--epochs', type=int, default=50,
-                        help='Number of epochs (default: 50)')
+                       help='Number of epochs (default: 50)')
     parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate (default: 1e-4)')
-    parser.add_argument('--save_freq', type=int, default=10,
-                        help='Save checkpoint every N epochs (default: 10)')
+                       help='Learning rate (default: 1e-4)')
     
     args = parser.parse_args()
     
     # Print configuration
     print("=" * 80)
-    print("Training Configuration:")
+    print("Weak Supervision Training Configuration:")
     print("-" * 80)
     for arg, value in vars(args).items():
         print(f"{arg:20s}: {value}")
