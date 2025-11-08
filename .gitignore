@@ -5,6 +5,9 @@ results/
 click_viz_*.png
 dataset/click_viz_*.png
 
+# jobsript
+jobscript.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

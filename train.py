@@ -1,4 +1,7 @@
-import os
+import os, sys
+USE_TQDM = sys.stdout.isatty()  # False på LSF
+os.environ["PYTHONUNBUFFERED"] = "1"  
+
 import argparse
 import torch
 import torch.nn as nn
@@ -6,6 +9,8 @@ import torch.optim as optim
 from tqdm import tqdm
 import numpy as np
 from datetime import datetime
+import json
+import matplotlib.pyplot as plt
 
 from dataset.dataloader import create_data_loaders
 from models.encoder_decoder import EncoderDecoder
@@ -13,52 +18,89 @@ from models.U_net import UNet
 from losses import get_loss_function
 from metrics import compute_all_metrics
 
+# --- Early stopping ---
+class EarlyStopper:
+    def __init__(self, patience=5, min_delta=1e-4, mode='max'):
+        assert mode in ['min', 'max']
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.best = float('-inf') if mode == 'max' else float('inf')
+        self.counter = 0
+    
+    def improved(self, current):
+        if self.mode == "max":
+            return current > self.best + self.min_delta
+        else:
+            return current < self.best - self.min_delta
+    
+    def step(self, current):
+        if self.improved(current):
+            self.best = current
+            self.counter = 0
+            return False  # Not early stopping
+        else:
+            self.counter += 1
+            return self.counter >= self.patience
+
 # test
 def train_epoch(model, train_loader, criterion, optimizer, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0
     all_metrics = {
-        'dice': [],
-        'iou': [],
-        'accuracy': [],
-        'sensitivity': [],
-        'specificity': []
+        'dice': [], 'iou': [], 'accuracy': [], 'sensitivity': [], 'specificity': []
     }
-    
-    pbar = tqdm(train_loader, desc='Training')
-    for images, masks in pbar:
+
+    pbar = tqdm(train_loader, desc='Training', disable=not USE_TQDM)
+    printed = False
+    for batch in pbar:
+        # To support both (images, masks) and (images, masks, fov)
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            images, masks, fov = batch
+        else:
+            images, masks = batch
+            fov = None
+
         images = images.to(device)
         masks = masks.to(device)
-        
-        # Forward pass
+        if fov is not None:
+            fov = fov.to(device)
+
+        # Forward
         optimizer.zero_grad()
         outputs = model(images)
-        
-        # Calculate loss
+
+        # Mask with FOV if available (for DRIVE dataset)
+        if fov is not None:
+            outputs = outputs * fov
+            masks   = masks * fov
+
+        # Loss
         loss = criterion(outputs, masks)
-        
-        # Backward pass
         loss.backward()
         optimizer.step()
-        
         total_loss += loss.item()
-        
-        # Calculate metrics
+
+        # Metrics
         with torch.no_grad():
             outputs_prob = torch.sigmoid(outputs)
             batch_metrics = compute_all_metrics(outputs_prob, masks)
-            for key in all_metrics:
-                all_metrics[key].append(batch_metrics[key])
-        
-        # Update progress bar
-        pbar.set_postfix({'loss': loss.item()})
-    
-    # Average metrics
+            for k in all_metrics:
+                all_metrics[k].append(batch_metrics[k])
+
+        if not printed:
+            print("shapes -> images:", tuple(images.shape),
+                  "masks:", tuple(masks.shape),
+                  "fov:", None if fov is None else tuple(fov.shape))
+            printed = True
+
+        if USE_TQDM:
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
     avg_loss = total_loss / len(train_loader)
-    avg_metrics = {key: np.mean(values) for key, values in all_metrics.items()}
+    avg_metrics = {k: float(np.mean(v)) for k, v in all_metrics.items()}
     avg_metrics['loss'] = avg_loss
-    
     return avg_metrics
 
 
@@ -67,39 +109,42 @@ def validate(model, val_loader, criterion, device):
     model.eval()
     total_loss = 0
     all_metrics = {
-        'dice': [],
-        'iou': [],
-        'accuracy': [],
-        'sensitivity': [],
-        'specificity': []
+        'dice': [], 'iou': [], 'accuracy': [], 'sensitivity': [], 'specificity': []
     }
-    
+
     with torch.no_grad():
-        pbar = tqdm(val_loader, desc='Validation')
-        for images, masks in pbar:
+        pbar = tqdm(val_loader, desc='Validation', disable=not USE_TQDM)
+        for batch in pbar:
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                images, masks, fov = batch
+            else:
+                images, masks = batch
+                fov = None
+
             images = images.to(device)
             masks = masks.to(device)
-            
-            # Forward pass
+            if fov is not None:
+                fov = fov.to(device)
+
             outputs = model(images)
-            
-            # Calculate loss
+            if fov is not None:
+                outputs = outputs * fov
+                masks   = masks * fov
+
             loss = criterion(outputs, masks)
             total_loss += loss.item()
-            
-            # Calculate metrics
+
             outputs_prob = torch.sigmoid(outputs)
             batch_metrics = compute_all_metrics(outputs_prob, masks)
-            for key in all_metrics:
-                all_metrics[key].append(batch_metrics[key])
-            
-            pbar.set_postfix({'loss': loss.item()})
-    
-    # Average metrics
+            for k in all_metrics:
+                all_metrics[k].append(batch_metrics[k])
+
+            if USE_TQDM:
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
     avg_loss = total_loss / len(val_loader)
-    avg_metrics = {key: np.mean(values) for key, values in all_metrics.items()}
+    avg_metrics = {k: float(np.mean(v)) for k, v in all_metrics.items()}
     avg_metrics['loss'] = avg_loss
-    
     return avg_metrics
 
 
@@ -119,7 +164,7 @@ def save_checkpoint(model, optimizer, epoch, metrics, args, filename):
 def train(args):
     """Main training function"""
     # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Create data loaders
@@ -162,6 +207,7 @@ def train(args):
         f"{args.dataset}_{args.model}_{args.loss}_{timestamp}"
     )
     os.makedirs(results_dir, exist_ok=True)
+    history_path = os.path.join(results_dir, 'history.json')
     
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -169,13 +215,33 @@ def train(args):
     
     best_dice = 0.0
     history = {
+        'dataset': args.dataset,
+        'model': args.model,
+        'loss_name': args.loss,
+        'epochs': args.epochs,
+        'lr': args.lr,
+        'batch_size': args.batch_size,
         'train_loss': [],
         'val_loss': [],
         'train_dice': [],
         'val_dice': [],
         'train_iou': [],
-        'val_iou': []
+        'val_iou': [],
+        'best_val_dice': None,
+        'best_epoch': None,
+        'test_metrics': None
     }
+
+    # tracking best training dice
+    best_train_dice = 0.0
+
+    # Early stopper
+    early_stopper = EarlyStopper(
+        patience=args.early_stop_patience, 
+        min_delta = args.early_stop_min_delta,
+        mode='max')
+    
+    PLOT_FREQ = args.plot_freq
     
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
@@ -183,6 +249,7 @@ def train(args):
         
         # Train
         train_metrics = train_epoch(model, train_loader, criterion, optimizer, device)
+        best_train_dice = max(best_train_dice, float(train_metrics['dice']))
         
         # Validate
         val_metrics = validate(model, val_loader, criterion, device)
@@ -209,9 +276,38 @@ def train(args):
         # Save best model
         if val_metrics['dice'] > best_dice:
             best_dice = val_metrics['dice']
+            history['best_val_dice'] = float(best_dice)
+            history['best_epoch'] = epoch + 1
             best_checkpoint = os.path.join(results_dir, 'best_model.pth')
             save_checkpoint(model, optimizer, epoch, val_metrics, args, best_checkpoint)
             print(f"✓ New best model! Dice: {best_dice:.4f}")
+
+        if (epoch + 1) % PLOT_FREQ == 0 or (epoch + 1) == args.epochs:
+            fig, axs = plt.subplots(1, 3, figsize=(12, 3))
+            axs[0].plot(history['train_loss'], label='train_loss')
+            axs[0].plot(history['val_loss'], label='val_loss')
+            axs[0].set_title('Loss')
+            axs[0].legend()
+
+            axs[1].plot(history['train_dice'], label='train_dice')
+            axs[1].plot(history['val_dice'], label='val_dice')
+            axs[1].set_title('Dice')
+            axs[1].legend()
+
+            axs[2].plot(history['train_iou'], label='train_iou')
+            axs[2].plot(history['val_iou'], label='val_iou')
+            axs[2].set_title('IoU')
+            axs[2].legend()
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(results_dir, f'progress_epoch_{epoch+1}.png'))
+            plt.close()
+            print(f"Saved progress plot for epoch {epoch+1}")
+
+        # Early stopping check
+        if early_stopper.step(val_metrics['dice']):
+            print(f"Early stopping triggered at epoch {epoch + 1}")
+            break
         
         # Save latest checkpoint
         if (epoch + 1) % args.save_freq == 0:
@@ -221,6 +317,13 @@ def train(args):
     print("\n" + "=" * 80)
     print("Training completed!")
     print(f"Best validation Dice: {best_dice:.4f}")
+
+    # --- Load best model for testing ---
+    best_ckpt_path = os.path.join(results_dir, 'best_model.pth')
+    if os.path.exists(best_ckpt_path):
+        ckpt = torch.load(best_ckpt_path, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        print(f"Loaded best model from epoch {ckpt['epoch']+1.}")
     
     # Test on test set
     print("\nEvaluating on test set...")
@@ -246,12 +349,79 @@ def train(args):
         f.write(f"\nTest Results:\n")
         for key, value in test_metrics.items():
             f.write(f"  {key}: {value:.4f}\n")
-    
+
     print(f"\nResults saved to: {results_dir}")
+   
+    # save test i history and dump to JSON
+    history["test_metrics"] = {k: float(v) for k, v in test_metrics.items()}
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent =2)
+    print(f"Saved per-epoch history to {history_path}")
+
+    csv_path = os.path.join(results_dir, 'history.csv')
+    with open(csv_path, 'w') as f:
+        f.write("epoch,train_loss,val_loss,train_dice,val_dice,train_iou,val_iou\n")
+        for i in range(len(history['train_loss'])):
+            f.write(f"{i+1},{history['train_loss'][i]:.6f},{history['val_loss'][i]:.6f},"
+                    f"{history['train_dice'][i]:.6f},{history['val_dice'][i]:.6f},"
+                    f"{history['train_iou'][i]:.6f},{history['val_iou'][i]:.6f}\n")
+    print(f"Saved CSV to: {csv_path}")
+
+    #plots for this run
+    plt.figure()
+    plt.plot(history['train_loss'], label='train_loss')
+    plt.plot(history['val_loss'], label='val_loss')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Loss curves')
+    plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'loss_curves.png')); plt.close()
+
+    plt.figure()
+    plt.plot(history['train_dice'], label='train_dice')
+    plt.plot(history['val_dice'], label='val_dice')
+    plt.xlabel('Epoch'); plt.ylabel('Dice'); plt.title('Dice curves')
+    plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'dice_curves.png')); plt.close()
+
+    plt.figure()
+    plt.plot(history['train_iou'], label='train_iou')
+    plt.plot(history['val_iou'], label='val_iou')
+    plt.xlabel('Epoch'); plt.ylabel('IoU'); plt.title('IoU curves')
+    plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'iou_curves.png')); plt.close()
+    print(f"Saved plots to: {results_dir}")
+
+    summary_path = "results/ALL_EXPERIMENTS_SUMMARY.csv"
+    header = ("dataset,model,loss,"
+              "best_train_dice,best_val_dice,"
+              "test_dice,test_iou,test_accuracy,test_sensitivity,test_specificity\n")
+
+    summary_row = (
+        f"{args.dataset},{args.model},{args.loss},"
+        f"{best_train_dice:.4f},{history['best_val_dice']:.4f},"
+        f"{test_metrics['dice']:.4f},{test_metrics['iou']:.4f},"
+        f"{test_metrics['accuracy']:.4f},"
+        f"{test_metrics['sensitivity']:.4f},"
+        f"{test_metrics['specificity']:.4f}\n"
+    )
+    os.makedirs("results", exist_ok=True)
+    write_header = not os.path.exists(summary_path)
+    with open(summary_path, "a") as f:
+        if write_header:
+            f.write(header)
+        f.write(summary_row)
+    print(f"[SUMMARY] {summary_row.strip()}")
+
 
 
 def main():
     parser = argparse.ArgumentParser(description='Train segmentation model')
+
+    parser.add_argument('--early_stop_patience', type=int, default=7,
+                    help='Early stopping patience on val metric (default: 7)')
+    parser.add_argument('--early_stop_min_delta', type=float, default=1e-4,
+                        help='Minimum improvement to reset patience (default: 1e-4)')
+    parser.add_argument('--plot_freq', type=int, default=5,
+                        help='Save progress plots every N epochs (default: 5)')
     
     # Dataset arguments
     parser.add_argument('--dataset', type=str, default='PH2', 
